@@ -1,4 +1,4 @@
-﻿#include "framework.h"
+#include "framework.h"
 #include "ValVoice.h"
 #include "resource.h"
 
