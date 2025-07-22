@@ -1,6 +1,6 @@
 #include "framework.h"
-#include "ValVoice.h"
-#include "resource.h"
+
+#include "Resource.h"
 
 #include <sapi.h>
 #include <sphelper.h>
@@ -13,12 +13,18 @@
 #include <codecvt>
 #include <locale>
 #include <shellapi.h>  // Include the header for ShellExecuteW
+#include <dwmapi.h>
+#include <windows.h>
+
 
 #pragma comment(lib, "sapi.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "Shell32.lib")  // Link against Shell32.lib
+#pragma comment(lib, "dwmapi.lib")
 
 #define MAX_LOADSTRING 100
+
+
 
 // Global Variables
 HINSTANCE hInst;
@@ -40,6 +46,8 @@ std::vector<std::wstring> g_blockedIds;
 HWND g_hTabDialogs[3] = { nullptr, nullptr, nullptr };
 const int g_tabDialogIds[3] = { IDD_TAB_MAIN, IDD_TAB_INFO, IDD_TAB_SETTINGS };
 
+HFONT g_hSegoeUIFont = nullptr;
+
 // Forward Declarations
 ATOM MyRegisterClass(HINSTANCE hInstance);
 BOOL InitInstance(HINSTANCE, int);
@@ -50,6 +58,24 @@ INT_PTR CALLBACK TabDialogProc(HWND, UINT, WPARAM, LPARAM);
 
 // Add this function near the top, after includes
 void PopulateVoices(HWND hCombo) {
+    if (!hCombo) return;
+    SendMessage(hCombo, CB_RESETCONTENT, 0, 0);
+    CComPtr<IEnumSpObjectTokens> cpEnum;
+    if (SUCCEEDED(SpEnumTokens(SPCAT_VOICES, NULL, NULL, &cpEnum)) && cpEnum) {
+        CComPtr<ISpObjectToken> cpToken;
+        ULONG fetched = 0;
+        while (cpEnum->Next(1, &cpToken, &fetched) == S_OK) {
+            LPWSTR desc = nullptr;
+            if (SUCCEEDED(SpGetDescription(cpToken, &desc))) {
+                SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)desc);
+                CoTaskMemFree(desc);
+            }
+            cpToken.Release();
+        }
+    }
+}
+
+void PopulateNarratorVoices(HWND hCombo) {
     if (!hCombo) return;
     SendMessage(hCombo, CB_RESETCONTENT, 0, 0);
     CComPtr<IEnumSpObjectTokens> cpEnum;
@@ -138,46 +164,16 @@ void LoadBlockedIds() {
 }
 
 void SpeakFromUI(HWND hTabWnd) {
-    ResetStatsIfNeeded(hTabWnd);
-
     if (!pVoice) {
-        MessageBoxW(hTabWnd, L"Voice engine not available.", L"Error", MB_ICONERROR);
-        return;
-    }
-
-    // Example: Replace with actual sender Riot ID in your integration
-    const wchar_t* senderRiotId = L"SomeRiotID";
-    for (const auto& blocked : g_blockedIds) {
-        if (wcscmp(senderRiotId, blocked.c_str()) == 0) {
-            MessageBoxW(hTabWnd, L"Sender is blocked.", L"Blocked", MB_ICONWARNING);
-            return;
-        }
-    }
-
-    // Enforce quota
-    if (g_messagesToday >= g_dailyQuota) {
-        MessageBoxW(hTabWnd, L"Daily quota reached.", L"Quota", MB_ICONWARNING);
+        MessageBoxW(hTabWnd, L"SAPI voice engine not initialized.", L"Error", MB_ICONERROR);
         return;
     }
 
     wchar_t text[1024];
     GetDlgItemTextW(hTabWnd, IDC_TEXT_INPUT, text, 1024);
-    size_t len = wcslen(text);
-    if (len > static_cast<size_t>(INT_MAX)) {
-        MessageBoxW(hTabWnd, L"Text length exceeds maximum allowed size.", L"Error", MB_ICONERROR);
+    if (wcslen(text) == 0) {
+        MessageBoxW(hTabWnd, L"Please enter text to speak.", L"Info", MB_ICONINFORMATION);
         return;
-    }
-    int intLen = static_cast<int>(len);
-    if (intLen == 0) return;
-
-    int uiRate = SendMessage(GetDlgItem(hTabWnd, IDC_RATE_SLIDER), TBM_GETPOS, 0, 0);
-    // Map 25–200 to -10 to +10
-    int rate = (int)(((uiRate - 25) / 175.0) * 20 - 10 + 0.5);
-    int volume = static_cast<int>(SendMessage(GetDlgItem(hTabWnd, IDC_VOLUME_SLIDER), TBM_GETPOS, 0, 0));
-
-    int agentIndex = SendMessage(GetDlgItem(hTabWnd, IDC_AGENT_COMBO), CB_GETCURSEL, 0, 0);
-    if (agentIndex >= 0 && agentIndex < _countof(agents)) {
-        rate += agents[agentIndex].rate;
     }
 
     // Set selected voice
@@ -197,32 +193,38 @@ void SpeakFromUI(HWND hTabWnd) {
         }
     }
 
-    if (pVoice) {
-        pVoice->SetRate(rate);
-        pVoice->SetVolume(volume);
-        pVoice->Speak(text, SPF_ASYNC, NULL);
-
-        // Update stats
-        g_messagesToday++;
-        g_charsToday += intLen;
-        SetDlgItemInt(hTabWnd, IDC_STATS_MSGS, g_messagesToday, FALSE);
-        SetDlgItemInt(hTabWnd, IDC_STATS_CHARS, g_charsToday, FALSE);
-
-        // Update quota
-        HWND hQuotaBar = GetDlgItem(hTabWnd, IDC_QUOTA_BAR);
-        SendMessage(hQuotaBar, PBM_SETPOS, g_dailyQuota - g_messagesToday, 0);
-        SetDlgItemInt(hTabWnd, IDC_QUOTA_VALUE, g_dailyQuota - g_messagesToday, FALSE);
-    }
+    pVoice->SetRate(0);    // Normal rate
+    pVoice->SetVolume(100); // Max volume
+    pVoice->Speak(text, SPF_ASYNC, NULL);
 }
+
+void EnableDarkMode(HWND hwnd) {
+    BOOL dark = TRUE;
+    // 20 = DWMWA_USE_IMMERSIVE_DARK_MODE before Windows 11, 19 for Windows 11+
+    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
+    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
+}
+
+
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow) {
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
 
-    // ✅ Optional OS check (safe and modern)
-    if (!IsWindows10OrGreater()) {
-        MessageBoxW(NULL, L"This app is optimized for Windows 10 or later.", L"Warning", MB_ICONWARNING);
-    }
+    //// Launch Riot Client at app startup
+    //HINSTANCE result = ShellExecuteW(
+    //    NULL,
+    //    L"open",
+    //    L"C:\\Riot Games\\Riot Client\\RiotClientServices.exe", // Use Riot Client path
+    //    NULL,
+    //    NULL,
+    //    SW_SHOWNORMAL
+    //);
+    //if ((INT_PTR)result <= 32) {
+    //    WCHAR buf[64];
+    //    wsprintf(buf, L"Failed to launch Riot Client. Error code: %d", (int)(INT_PTR)result);
+    //    MessageBoxW(NULL, buf, L"Error", MB_OK | MB_ICONERROR);
+    //}
 
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
     LoadStringW(hInstance, IDC_VALVOICE, szWindowClass, MAX_LOADSTRING);
@@ -252,6 +254,11 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
 
     // At app exit, before return:
     g_blockedIds.clear();
+
+    if (g_hSegoeUIFont) {
+        DeleteObject(g_hSegoeUIFont);
+        g_hSegoeUIFont = nullptr;
+    }
 
     return (int)msg.wParam;
 }
@@ -319,8 +326,25 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow) {
 
     ResetStatsIfNeeded(hWnd);
 
+    // Center the main window on the screen
+    RECT rc;
+    GetWindowRect(hWnd, &rc);
+    int winWidth = rc.right - rc.left;
+    int winHeight = rc.bottom - rc.top;
+
+    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+    int x = (screenWidth - winWidth) / 2;
+    int y = (screenHeight - winHeight) / 2;
+
+    SetWindowPos(hWnd, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
+
+    EnableDarkMode(hWnd);
+
     return TRUE;
 }
 
@@ -335,7 +359,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         tie.mask = TCIF_TEXT;
         tie.pszText = (LPWSTR)L"Main";
         TabCtrl_InsertItem(hTab, 0, &tie);
-       
+
         tie.pszText = (LPWSTR)L"Info";
         TabCtrl_InsertItem(hTab, 1, &tie);
 
@@ -383,6 +407,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             HWND hVoiceCombo = GetDlgItem(hTabMain, IDC_VOICE_COMBO);
             PopulateVoices(hVoiceCombo);
             SendMessage(hVoiceCombo, CB_SETCURSEL, 0, 0);
+
+            // Assuming hTextInput is the HWND of your "Text to Speak" edit control
+            HWND hTextInput = GetDlgItem(hTabMain, IDC_TEXT_INPUT);
+            SendMessageW(hTextInput, EM_SETCUEBANNER, 0, (LPARAM)L"Type your message here...");
+
+            if (!g_hSegoeUIFont) {
+                g_hSegoeUIFont = CreateFontW(
+                    -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+                    DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI"
+                );
+            }
+
+            SendMessageW(GetDlgItem(hTabMain, IDC_TEXT_INPUT), WM_SETFONT, (WPARAM)g_hSegoeUIFont, TRUE);
+            SendMessageW(GetDlgItem(hTabMain, IDC_SPEAK_BUTTON), WM_SETFONT, (WPARAM)g_hSegoeUIFont, TRUE);
+            SendMessageW(GetDlgItem(hTabMain, IDC_STOP_BUTTON), WM_SETFONT, (WPARAM)g_hSegoeUIFont, TRUE);
+            // ...repeat for other controls as needed
         }
 
         // Info Tab (now also handles settings controls)
@@ -446,21 +487,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 Button_SetCheck(hSyncVoice, BST_UNCHECKED);
             }
 
-            // Initialize "Ignore Player Messages" add combo box (empty by default)
-            HWND hIgnoreAdd = GetDlgItem(hTabSettings, IDC_SETTINGS_IGNORE_ADD);
-            if (hIgnoreAdd) {
-                // Optionally set cue banner or placeholder text if desired
-                // SendMessage(hIgnoreAdd, CB_ADDSTRING, 0, (LPARAM)L"Add RiotId#RiotTag");
-            }
-
-            // Initialize "Ignore Player Messages" list combo box
-            HWND hIgnoreList = GetDlgItem(hTabSettings, IDC_SETTINGS_IGNORE_LIST);
-            if (hIgnoreList) {
-                // Populate with blocked IDs if any
-                for (const auto& id : g_blockedIds) {
-                    SendMessageW(hIgnoreList, CB_ADDSTRING, 0, (LPARAM)id.c_str());
-                }
-            }
+            HWND hNarratorVoiceCombo = GetDlgItem(hTabSettings, IDC_NARRATOR_VOICE_COMBO);
+            PopulateNarratorVoices(hNarratorVoiceCombo);
+            SendMessage(hNarratorVoiceCombo, CB_SETCURSEL, 0, 0); // Select first voice by default
         }
 
         return TRUE;
@@ -491,7 +520,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
         // Now handle tab-specific controls using hTabWnd
         switch (id) {
-        // --- Main Tab ---
+            // --- Main Tab ---
         case IDC_SPEAK_BUTTON:
             SpeakFromUI(hTabWnd);
             break;
@@ -503,7 +532,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             pVoice->Speak(NULL, SPF_PURGEBEFORESPEAK, NULL);
             break;
 
-        // --- Info Tab (now also handles settings controls) ---
+            // --- Info Tab (now also handles settings controls) ---
         case IDC_INFO_PREMIUM_BTN:
             MessageBoxW(hTabWnd, L"Redirecting to premium purchase...", L"Get Premium", MB_OK | MB_ICONINFORMATION);
             // Optionally, open a URL or show a premium dialog
@@ -540,6 +569,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         case IDC_SETTINGS_SYNC_BTN:
             MessageBoxW(hTabWnd, L"Sync voice settings to valorant clicked.\n(Implement sync logic here.)", L"Settings", MB_OK | MB_ICONINFORMATION);
             break;
+        case IDC_NARRATOR_SPEAK_BUTTON: {
+            HWND hNarratorVoiceCombo = GetDlgItem(hTabWnd, IDC_NARRATOR_VOICE_COMBO);
+            int sel = (int)SendMessage(hNarratorVoiceCombo, CB_GETCURSEL, 0, 0);
+            if (sel != CB_ERR) {
+                CComPtr<IEnumSpObjectTokens> cpEnum;
+                if (SUCCEEDED(SpEnumTokens(SPCAT_VOICES, NULL, NULL, &cpEnum)) && cpEnum) {
+                    CComPtr<ISpObjectToken> cpToken;
+                    ULONG fetched = 0;
+                    for (int i = 0; i <= sel; ++i) {
+                        cpEnum->Next(1, &cpToken, &fetched);
+                    }
+                    if (cpToken) {
+                        pVoice->SetVoice(cpToken);
+                    }
+                }
+            }
+            wchar_t text[1024];
+            GetDlgItemTextW(hTabWnd, IDC_TEXT_INPUT, text, 1024);
+            pVoice->SetRate(0);
+            pVoice->SetVolume(100);
+            pVoice->Speak(text, SPF_ASYNC, NULL);
+            break;
+        }
         }
         break;
     }
@@ -578,9 +630,24 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
 INT_PTR CALLBACK LoginDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_INITDIALOG:
-        SetDlgItemTextW(hDlg, IDC_LOGIN_USERID, g_userId);
-        Button_SetCheck(GetDlgItem(hDlg, IDC_LOGIN_PREMIUM), g_isPremium ? BST_CHECKED : BST_UNCHECKED);
-        return (INT_PTR)TRUE;
+        // Center the login dialog on the screen
+    {
+        RECT rc;
+        GetWindowRect(hDlg, &rc);
+        int winWidth = rc.right - rc.left;
+        int winHeight = rc.bottom - rc.top;
+
+        int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+        int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+        int x = (screenWidth - winWidth) / 2;
+        int y = (screenHeight - winHeight) / 2;
+
+        SetWindowPos(hDlg, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    }
+    SetDlgItemTextW(hDlg, IDC_LOGIN_USERID, g_userId);
+    Button_SetCheck(GetDlgItem(hDlg, IDC_LOGIN_PREMIUM), g_isPremium ? BST_CHECKED : BST_UNCHECKED);
+    return (INT_PTR)TRUE;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK) {
             GetDlgItemTextW(hDlg, IDC_LOGIN_USERID, g_userId, _countof(g_userId));
